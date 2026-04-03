@@ -71,7 +71,7 @@ export const EventTypes = {
     DRAGWP: 10
 };
 
-const LONG_PRESS_DURATION = 750;   // ms to hold for long press
+const LONG_PRESS_DURATION = 500;   // ms to hold for long press
 const LONG_PRESS_TOLERANCE = 15;   // pixels allowed movement during long press
 const DOUBLE_TAP_DURATION = 400;   // ms between taps for double tap
 const DRAG_THRESHOLD = 8;          // pixels movement to start drag
@@ -2215,53 +2215,59 @@ class MapHolder extends DrawingPositionConverter {
             fe.stopImmediatePropagation();
             fe.preventDefault();
         } else {
-            // not on a route point - start long press timer with animation
+            // not on a route point - start long press detection (no animation yet)
             this._cancelLongPress();
             this._gestureState.longPressPixel = pixel.slice();
             const mapCoord = this.pixelToCoord(pixel);
-            let animStart = 0;
-            this._gestureState.longPressAnimating = true;
-            const animLoop = (now) => {
-                if (!this._gestureState.longPressAnimating) return;
-                if (!animStart) animStart = now;
-                const progress = Math.min(1, (now - animStart) / LONG_PRESS_DURATION);
-                this.routinglayer.setLongPressPreview(mapCoord, progress);
-                if (progress < 1) {
-                    this._gestureState.longPressAnimFrame = requestAnimationFrame(animLoop);
-                }
-            };
-            this._gestureState.longPressAnimFrame = requestAnimationFrame(animLoop);
+            const LONGPRESS_ANIM_DURATION = 2000;
             this._gestureState.longPressTimer = setTimeout(() => {
+                // long press detected - start animation phase
                 this._gestureState.longPressTimer = null;
-                this._gestureState.longPressFired = true;
-                this._gestureState.longPressAnimating = false;
-                this._gestureState.longPressAnimFrame = null;
-                this.routinglayer.clearLongPressPreview();
-                const lpPixel = this._gestureState.longPressPixel;
-                const lpCoord = this.pixelToCoord(lpPixel);
-                const point = this.fromMapToPoint(lpCoord);
-                const segHit = this.routinglayer.findNearestSegment(lpPixel);
-                const evdata = {
-                    type: EventTypes.LONGPRESS,
-                    point: point,
-                    pixel: lpPixel,
-                    segmentIndex: segHit ? segHit.segmentIndex : undefined
-                };
-                this._callHandlers(evdata);
-                // after waypoint is added, transition into drag for the new point
-                if (evdata.newIndex !== undefined) {
-                    const wp = this.routinglayer.getWaypointAt(evdata.newIndex);
-                    if (wp) {
-                        this._gestureState.dragState = {
-                            index: evdata.newIndex,
-                            waypoint: wp,
-                            startPixel: lpPixel.slice(),
-                            pointerId: undefined,
-                            isDragging: true
-                        };
-                        this.routinglayer.setDragOverlay(evdata.newIndex, lpCoord);
+                let animStart = 0;
+                this._gestureState.longPressAnimating = true;
+                const animLoop = (now) => {
+                    if (!this._gestureState.longPressAnimating) return;
+                    if (!animStart) animStart = now;
+                    const progress = Math.min(1, (now - animStart) / LONGPRESS_ANIM_DURATION);
+                    this.routinglayer.setLongPressPreview(mapCoord, progress);
+                    if (progress < 1) {
+                        this._gestureState.longPressAnimFrame = requestAnimationFrame(animLoop);
                     }
-                }
+                };
+                this._gestureState.longPressAnimFrame = requestAnimationFrame(animLoop);
+                // after animation completes, add waypoint
+                this._gestureState.longPressTimer = setTimeout(() => {
+                    this._gestureState.longPressTimer = null;
+                    this._gestureState.longPressFired = true;
+                    this._gestureState.longPressAnimating = false;
+                    this._gestureState.longPressAnimFrame = null;
+                    this.routinglayer.clearLongPressPreview();
+                    const lpPixel = this._gestureState.longPressPixel;
+                    const lpCoord = this.pixelToCoord(lpPixel);
+                    const point = this.fromMapToPoint(lpCoord);
+                    const segHit = this.routinglayer.findNearestSegment(lpPixel);
+                    const evdata = {
+                        type: EventTypes.LONGPRESS,
+                        point: point,
+                        pixel: lpPixel,
+                        segmentIndex: segHit ? segHit.segmentIndex : undefined
+                    };
+                    this._callHandlers(evdata);
+                    // after waypoint is added, transition into drag for the new point
+                    if (evdata.newIndex !== undefined) {
+                        const wp = this.routinglayer.getWaypointAt(evdata.newIndex);
+                        if (wp) {
+                            this._gestureState.dragState = {
+                                index: evdata.newIndex,
+                                waypoint: wp,
+                                startPixel: lpPixel.slice(),
+                                pointerId: undefined,
+                                isDragging: true
+                            };
+                            this.routinglayer.setDragOverlay(evdata.newIndex, lpCoord);
+                        }
+                    }
+                }, LONGPRESS_ANIM_DURATION);
             }, LONG_PRESS_DURATION);
         }
     }
@@ -2319,8 +2325,12 @@ class MapHolder extends DrawingPositionConverter {
         const pixel = this.olmap.getEventPixel(fe);
         if (this._gestureState.dragState) {
             const ds = this._gestureState.dragState;
-            fe.stopImmediatePropagation();
-            fe.preventDefault();
+            if (ds.pointerId !== undefined) {
+                // drag started from pointerdown on waypoint - OL never saw the down, suppress up too
+                fe.stopImmediatePropagation();
+                fe.preventDefault();
+            }
+            // else: drag from long-press transition - OL saw the pointerdown, let it see pointerup
             if (ds.isDragging) {
                 // drag completed - fire DRAGWP event
                 this.routinglayer.clearDragOverlay();
