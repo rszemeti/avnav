@@ -852,9 +852,23 @@ const EditRoutePage = (props) => {
             if (!checkRouteWritable(dialogContext)) return true;
             let point = evdata.point;
             if (!point) return true;
-            currentEditor.addWaypoint(point);
-            setLastCenteredWp(currentEditor.getIndex());
-            Toast("Waypoint added");
+            if (evdata.segmentIndex !== undefined) {
+                // near a route segment - insert between the two segment endpoints
+                currentEditor.setNewIndex(evdata.segmentIndex);
+                currentEditor.addWaypoint(point);
+                setLastCenteredWp(currentEditor.getIndex());
+                Toast("Waypoint inserted");
+            } else {
+                // append at end of route
+                let route = currentEditor.getRoute();
+                if (route && route.points.length > 0) {
+                    currentEditor.setNewIndex(route.points.length - 1);
+                }
+                currentEditor.addWaypoint(point);
+                setLastCenteredWp(currentEditor.getIndex());
+                Toast("Waypoint added");
+            }
+            evdata.newIndex = currentEditor.getIndex();
             return true;
         }
         if (evdata.type === EventTypes.DOUBLETAPWP) {
