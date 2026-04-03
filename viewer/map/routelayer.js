@@ -140,6 +140,19 @@ const RouteLayer=function(mapholder){
     globalStore.register(()=>{
         this.currentLeg.reset();
     },activeRoute.getStoreKeys({seq:keys.gui.global.propertySequence,rl:keys.nav.routeHandler.useRhumbLine}))
+    /**
+     * drag overlay state for visual feedback during route point dragging
+     * @type {{index: number, mapPoint: Array}|null}
+     * @private
+     */
+    this._dragOverlay=null;
+
+    /**
+     * long press preview state for animated growing dot
+     * @type {{mapPoint: Array, progress: number}|null}
+     * @private
+     */
+    this._longPressPreview=null;
 
 
 };
@@ -269,24 +282,40 @@ RouteLayer.prototype.onPostCompose=function(center,drawing) {
         let routeTarget=this.routeDisplay.getTargetIndex();
         this.routePixel=[];
         let allSegments=this.routeDisplay.getSegments();
-        for (let i in allSegments){
-            let currentRoutePoints=allSegments[i];
-            drawing.drawLineToContext(currentRoutePoints, this.lineStyle);
-        }
         let currentRoutePoints=this.routeDisplay.getPoints();
+        // build adjusted points array if dragging
+        let adjustedPoints = currentRoutePoints;
+        if (this._dragOverlay && this._dragOverlay.index >= 0 && this._dragOverlay.index < currentRoutePoints.length) {
+            adjustedPoints = currentRoutePoints.slice();
+            adjustedPoints[this._dragOverlay.index] = this._dragOverlay.mapPoint;
+        }
+        // draw segments, replacing those adjacent to dragged point with straight lines
+        for (let i = 0; i < allSegments.length; i++){
+            if (this._dragOverlay && (i === this._dragOverlay.index - 1 || i === this._dragOverlay.index)) {
+                // draw a straight line using adjusted endpoints
+                drawing.drawLineToContext([adjustedPoints[i], adjustedPoints[i + 1]], this.lineStyle);
+            } else {
+                drawing.drawLineToContext(allSegments[i], this.lineStyle);
+            }
+        }
         let active = currentEditor.getIndex();
         let i,style;
         for (i = 0; i < currentRoutePoints.length; i++) {
+            let drawPoint=currentRoutePoints[i];
             style=this.normalWpStyle;
             if (i == active) style=this.activeWpStyle;
             else {
                 if (i == routeTarget) style=this.routeTargetStyle;
             }
-            this.routePixel.push(drawing.drawBubbleToContext(currentRoutePoints[i],wpSize,style));
+            if (this._dragOverlay && this._dragOverlay.index === i) {
+                drawPoint=this._dragOverlay.mapPoint;
+                style={color: "white", width: 2, background: "rgba(255,0,0,0.6)"};
+            }
+            this.routePixel.push(drawing.drawBubbleToContext(drawPoint,wpSize,style));
             wp=route.points[i];
             if (wp && wp.name) text=wp.name;
             else text=i+"";
-            drawing.drawTextToContext(currentRoutePoints[i],text,this.textStyle);
+            drawing.drawTextToContext(drawPoint,text,this.textStyle);
         }
     }
     else {
@@ -294,6 +323,20 @@ RouteLayer.prototype.onPostCompose=function(center,drawing) {
 
     }
 
+    // draw long-press preview (growing dot)
+    if (this._longPressPreview) {
+        let wpSize=globalStore.getData(keys.properties.routeWpSize);
+        let minRadius = 2;
+        let maxRadius = wpSize * 2;
+        let radius = minRadius + (maxRadius - minRadius) * this._longPressPreview.progress;
+        let alpha = 0.3 + 0.5 * this._longPressPreview.progress;
+        let previewStyle = {
+            color: "rgba(255,255,0," + alpha + ")",
+            width: 2,
+            background: "rgba(255,200,0," + alpha + ")"
+        };
+        drawing.drawBubbleToContext(this._longPressPreview.mapPoint, radius, previewStyle);
+    }
 
 };
 /**
@@ -318,6 +361,54 @@ RouteLayer.prototype.findTarget=function(pixel){
         }
     }
     return undefined;
+};
+/**
+ * find a route waypoint at the given pixel and return both index and waypoint
+ * @param pixel
+ * @returns {{index: number, waypoint: navobjects.WayPoint}|null}
+ */
+RouteLayer.prototype.findTargetWithIndex=function(pixel){
+    let tolerance=globalStore.getData(keys.properties.clickTolerance)/2;
+    let currentEditor=this._displayEditing?editingRoute:activeRoute;
+    if (this.routePixel) {
+        let idx = this.mapholder.findTargets(pixel, this.routePixel, tolerance);
+        if (idx.length > 0) {
+            return {index: idx[0], waypoint: currentEditor.getPointAt(idx[0])};
+        }
+    }
+    return null;
+};
+/**
+ * set drag overlay to show a route point at a temporary position during drag
+ * @param {number} index - the route point index being dragged
+ * @param {Array} mapPoint - the current map coordinates of the drag position
+ */
+RouteLayer.prototype.setDragOverlay=function(index, mapPoint){
+    this._dragOverlay={index: index, mapPoint: mapPoint};
+    this.mapholder.triggerRender();
+};
+/**
+ * clear the drag overlay
+ */
+RouteLayer.prototype.clearDragOverlay=function(){
+    this._dragOverlay=null;
+    this.mapholder.triggerRender();
+};
+/**
+ * set long-press preview to show a growing dot at the press location
+ * @param {Array} mapPoint - map coordinates
+ * @param {number} progress - 0 to 1
+ */
+RouteLayer.prototype.setLongPressPreview=function(mapPoint, progress){
+    this._longPressPreview={mapPoint: mapPoint, progress: Math.min(1, Math.max(0, progress))};
+    this.mapholder.triggerRender();
+};
+/**
+ * clear the long-press preview
+ */
+RouteLayer.prototype.clearLongPressPreview=function(){
+    this._longPressPreview=null;
+    this.mapholder.triggerRender();
 };
 RouteLayer.prototype.dataChanged=function() {
     this.visible=globalStore.getData(keys.properties.layers.nav);

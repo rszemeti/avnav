@@ -65,9 +65,16 @@ export const EventTypes = {
     LOAD: 4,
     FEATURE: 5,
     SHOWMAP: 6,
-    HIDEMAP: 7
-
+    HIDEMAP: 7,
+    LONGPRESS: 8,
+    DOUBLETAPWP: 9,
+    DRAGWP: 10
 };
+
+const LONG_PRESS_DURATION = 500;   // ms to hold for long press
+const LONG_PRESS_TOLERANCE = 15;   // pixels allowed movement during long press
+const DOUBLE_TAP_DURATION = 400;   // ms between taps for double tap
+const DRAG_THRESHOLD = 8;          // pixels movement to start drag
 
 const EVENTLOG=false;
 
@@ -405,6 +412,24 @@ class MapHolder extends DrawingPositionConverter {
          * @private
          */
         this._lastTouches=[];
+        /**
+         * route editing gesture state
+         * @private
+         */
+        this._gestureState = {
+            longPressTimer: null,
+            longPressPixel: null,
+            longPressFired: false,
+            dragState: null,       // {index, waypoint, startPixel, pointerId, isDragging}
+            lastWpTapTime: 0,
+            lastWpTapIndex: -1
+        };
+        /**
+         * suppress the next OL click event (after long press)
+         * @type {boolean}
+         * @private
+         */
+        this._suppressNextClick = false;
         /**
          * keep the last map viewport that we used to register
          * our event handlers BEFORE any map handlers
@@ -1149,10 +1174,15 @@ class MapHolder extends DrawingPositionConverter {
                                 if (this._lastTouches !== undefined && this._lastTouches.length > 0){
                                     base.log("drop mouse event");
                                     fe.stopImmediatePropagation();
+                                    return;
                                 }
                             }
                             if (EVENTLOG) {
                                 evlog("RAW" + ev, fe)
+                            }
+                            // route editing gesture handling
+                            if (this.routingActive) {
+                                this._handleRouteGesture(ev, fe);
                             }
                         })
                     }
@@ -1784,6 +1814,10 @@ class MapHolder extends DrawingPositionConverter {
      * @param {MapBrowserEvent} evt
      */
     onClick(evt) {
+        if (this._suppressNextClick) {
+            this._suppressNextClick = false;
+            return;
+        }
         evt.preventDefault();
         evt.stopPropagation();
         this.featureAction(evt.pixel);
@@ -2083,6 +2117,210 @@ class MapHolder extends DrawingPositionConverter {
         this.eventGuards.forEach((guard) => {
             guard(eventName);
         })
+    }
+
+    /**
+     * cancel long press gesture
+     * @private
+     */
+    _cancelLongPress() {
+        if (this._gestureState.longPressTimer) {
+            clearTimeout(this._gestureState.longPressTimer);
+            this._gestureState.longPressTimer = null;
+        }
+        if (this._gestureState.longPressAnimFrame) {
+            cancelAnimationFrame(this._gestureState.longPressAnimFrame);
+            this._gestureState.longPressAnimFrame = null;
+        }
+        if (this._gestureState.longPressAnimating) {
+            this.routinglayer.clearLongPressPreview();
+            this._gestureState.longPressAnimating = false;
+        }
+        this._gestureState.longPressFired = false;
+    }
+
+    /**
+     * cancel all route editing gestures
+     * @private
+     */
+    _cancelAllGestures() {
+        this._cancelLongPress();
+        if (this._gestureState.dragState && this._gestureState.dragState.isDragging) {
+            this.routinglayer.clearDragOverlay();
+        }
+        this._gestureState.dragState = null;
+    }
+
+    /**
+     * main route gesture dispatcher, called from viewport-level event handlers
+     * @param {string} evType - pointer event type
+     * @param {PointerEvent} fe - the DOM pointer event
+     * @private
+     */
+    _handleRouteGesture(evType, fe) {
+        switch (evType) {
+            case 'pointerdown':
+                this._onGesturePointerDown(fe);
+                break;
+            case 'pointermove':
+                this._onGesturePointerMove(fe);
+                break;
+            case 'pointerup':
+                this._onGesturePointerUp(fe);
+                break;
+            case 'pointercancel':
+                this._cancelAllGestures();
+                break;
+        }
+    }
+
+    /**
+     * handle pointer down for route editing gestures
+     * @param {PointerEvent} fe
+     * @private
+     */
+    _onGesturePointerDown(fe) {
+        if (!this.olmap) return;
+        this._suppressNextClick = false;
+        const pixel = this.olmap.getEventPixel(fe);
+        const hit = this.routinglayer.findTargetWithIndex(pixel);
+        if (hit) {
+            // check for double tap on same waypoint
+            const now = Date.now();
+            if (this._gestureState.lastWpTapIndex === hit.index &&
+                (now - this._gestureState.lastWpTapTime) < DOUBLE_TAP_DURATION) {
+                // double tap detected - delete
+                this._gestureState.lastWpTapTime = 0;
+                this._gestureState.lastWpTapIndex = -1;
+                this._gestureState.dragState = null;
+                this._cancelLongPress();
+                fe.stopImmediatePropagation();
+                fe.preventDefault();
+                this._callHandlers({
+                    type: EventTypes.DOUBLETAPWP,
+                    wp: hit.waypoint,
+                    index: hit.index
+                });
+                return;
+            }
+            // start tracking for potential drag
+            this._gestureState.dragState = {
+                index: hit.index,
+                waypoint: hit.waypoint,
+                startPixel: pixel.slice(),
+                pointerId: fe.pointerId,
+                isDragging: false
+            };
+            // suppress OL so it won't start panning from route point
+            fe.stopImmediatePropagation();
+            fe.preventDefault();
+        } else {
+            // not on a route point - start long press timer with animation
+            this._cancelLongPress();
+            this._gestureState.longPressPixel = pixel.slice();
+            const mapCoord = this.pixelToCoord(pixel);
+            const animStart = performance.now();
+            this._gestureState.longPressAnimating = true;
+            const animLoop = (now) => {
+                if (!this._gestureState.longPressAnimating) return;
+                const progress = Math.min(1, (now - animStart) / LONG_PRESS_DURATION);
+                this.routinglayer.setLongPressPreview(mapCoord, progress);
+                if (progress < 1) {
+                    this._gestureState.longPressAnimFrame = requestAnimationFrame(animLoop);
+                }
+            };
+            this._gestureState.longPressAnimFrame = requestAnimationFrame(animLoop);
+            this._gestureState.longPressTimer = setTimeout(() => {
+                this._gestureState.longPressTimer = null;
+                this._gestureState.longPressFired = true;
+                this._gestureState.longPressAnimating = false;
+                this._gestureState.longPressAnimFrame = null;
+                this.routinglayer.clearLongPressPreview();
+                const lpCoord = this.pixelToCoord(this._gestureState.longPressPixel);
+                const point = this.fromMapToPoint(lpCoord);
+                this._callHandlers({
+                    type: EventTypes.LONGPRESS,
+                    point: point,
+                    pixel: this._gestureState.longPressPixel
+                });
+            }, LONG_PRESS_DURATION);
+        }
+    }
+
+    /**
+     * handle pointer move for route editing gestures
+     * @param {PointerEvent} fe
+     * @private
+     */
+    _onGesturePointerMove(fe) {
+        if (!this.olmap) return;
+        const pixel = this.olmap.getEventPixel(fe);
+        // check drag state
+        if (this._gestureState.dragState) {
+            const ds = this._gestureState.dragState;
+            if (fe.pointerId !== undefined && ds.pointerId !== undefined && fe.pointerId !== ds.pointerId) return;
+            const dx = pixel[0] - ds.startPixel[0];
+            const dy = pixel[1] - ds.startPixel[1];
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (!ds.isDragging && dist >= DRAG_THRESHOLD) {
+                ds.isDragging = true;
+            }
+            if (ds.isDragging) {
+                fe.stopImmediatePropagation();
+                fe.preventDefault();
+                // update drag visual
+                const mapPoint = this.pixelToCoord(pixel);
+                this.routinglayer.setDragOverlay(ds.index, mapPoint);
+            }
+            return;
+        }
+        // check long press tolerance
+        if (this._gestureState.longPressTimer && this._gestureState.longPressPixel) {
+            const dx = pixel[0] - this._gestureState.longPressPixel[0];
+            const dy = pixel[1] - this._gestureState.longPressPixel[1];
+            if (Math.sqrt(dx * dx + dy * dy) > LONG_PRESS_TOLERANCE) {
+                this._cancelLongPress();
+            }
+        }
+    }
+
+    /**
+     * handle pointer up for route editing gestures
+     * @param {PointerEvent} fe
+     * @private
+     */
+    _onGesturePointerUp(fe) {
+        if (!this.olmap) return;
+        // handle long press: suppress the OL click that follows
+        if (this._gestureState.longPressFired) {
+            this._suppressNextClick = true;
+            this._gestureState.longPressFired = false;
+        }
+        this._cancelLongPress();
+        const pixel = this.olmap.getEventPixel(fe);
+        if (this._gestureState.dragState) {
+            const ds = this._gestureState.dragState;
+            fe.stopImmediatePropagation();
+            fe.preventDefault();
+            if (ds.isDragging) {
+                // drag completed - fire DRAGWP event
+                this.routinglayer.clearDragOverlay();
+                const mapCoord = this.pixelToCoord(pixel);
+                const newPoint = this.fromMapToPoint(mapCoord);
+                this._callHandlers({
+                    type: EventTypes.DRAGWP,
+                    wp: ds.waypoint,
+                    index: ds.index,
+                    newPoint: newPoint
+                });
+            } else {
+                // was a tap on a route point (no drag) - fire SELECTWP manually
+                this._gestureState.lastWpTapTime = Date.now();
+                this._gestureState.lastWpTapIndex = ds.index;
+                this._callHandlers({type: EventTypes.SELECTWP, wp: ds.waypoint});
+            }
+            this._gestureState.dragState = null;
+        }
     }
 
     registerMapWidget(page, config, callback) {

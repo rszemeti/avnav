@@ -592,6 +592,7 @@ const EditRoutePage = (props) => {
     const [lastCenteredWp, setLastCenteredWp] = useState();
     const [connectedMode]=useStoreState(keys.properties.connectedMode);
     const hasCentered = useRef(false);
+    const pendingWpDialogTimer = useRef(null);
     const showingActiveRoute=isActiveRoute(activeState,editorState);
     const routeWritable=!StateHelper.isServerRoute(showingActiveRoute?activeState:editorState) || connectedMode;
     const wpTimer = useTimer(() => {
@@ -618,6 +619,10 @@ const EditRoutePage = (props) => {
             MapHolder.setBoatOffsetXY(lastBoatOffset.current);
             MapHolder.setGpsLock(lastGpsLock.current, true,false,true);
             RouteHandler.unsetCurrentRoutePage(PAGENAME);
+            if (pendingWpDialogTimer.current) {
+                clearTimeout(pendingWpDialogTimer.current);
+                pendingWpDialogTimer.current = null;
+            }
         }
     }, []);
 
@@ -830,10 +835,52 @@ const EditRoutePage = (props) => {
         if (evdata.type === EventTypes.SELECTWP) {
             const currentIndex = currentEditor.getIndex();
             const newIndex = currentEditor.getIndexFromPoint(evdata.wp);
-            if (currentIndex !== newIndex) currentEditor.setNewIndex(newIndex);
-            else {
-                startWaypointDialog(currentEditor.getPointAt(currentIndex), currentIndex, dialogContext);
+            if (currentIndex !== newIndex) {
+                currentEditor.setNewIndex(newIndex);
+            } else {
+                // delay dialog open to allow double-tap detection
+                if (pendingWpDialogTimer.current) clearTimeout(pendingWpDialogTimer.current);
+                pendingWpDialogTimer.current = setTimeout(() => {
+                    pendingWpDialogTimer.current = null;
+                    startWaypointDialog(currentEditor.getPointAt(currentIndex), currentIndex, dialogContext);
+                }, 400);
             }
+            return true;
+        }
+        if (evdata.type === EventTypes.LONGPRESS) {
+            // long press on map - add a new waypoint at that location
+            if (!checkRouteWritable(dialogContext)) return true;
+            let point = evdata.point;
+            if (!point) return true;
+            currentEditor.addWaypoint(point);
+            setLastCenteredWp(currentEditor.getIndex());
+            Toast("Waypoint added");
+            return true;
+        }
+        if (evdata.type === EventTypes.DOUBLETAPWP) {
+            // double tap on waypoint - delete it
+            if (pendingWpDialogTimer.current) {
+                clearTimeout(pendingWpDialogTimer.current);
+                pendingWpDialogTimer.current = null;
+            }
+            if (!checkRouteWritable(dialogContext)) return true;
+            currentEditor.deleteWaypoint(evdata.index);
+            let newIndex = currentEditor.getIndex();
+            let currentPoint = currentEditor.getPointAt(newIndex);
+            if (currentPoint) {
+                MapHolder.setCenter(currentPoint);
+                setLastCenteredWp(newIndex);
+            }
+            Toast("Waypoint deleted");
+            return true;
+        }
+        if (evdata.type === EventTypes.DRAGWP) {
+            // drag completed on waypoint - move it to new position
+            if (!checkRouteWritable(dialogContext)) return true;
+            let newPoint = evdata.newPoint;
+            if (!newPoint) return true;
+            currentEditor.changeSelectedWaypoint(newPoint, evdata.index);
+            setLastCenteredWp(evdata.index);
             return true;
         }
         if (evdata.type === EventTypes.FEATURE) {
